@@ -1,0 +1,7 @@
+{
+  "Isolation Forest": 0.652719414146064,
+  "Autoencoder": 7.528877258300781,
+  "Logistic Regression": 0.9999999976247462,
+  "seed": 42,
+  "input_dim": 30
+}
