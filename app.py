@@ -430,6 +430,120 @@ def make_template_csv():
     return pd.DataFrame([{col: 0.0 for col in feature_names}]).to_csv(index=False).encode("utf-8")
 
 
+
+def prepare_input_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Validate and prepare the 30 required input features in the exact training order."""
+    missing = [col for col in feature_names if col not in df.columns]
+    if missing:
+        raise ValueError("Thiếu các cột: " + ", ".join(missing))
+
+    X = df[feature_names].copy()
+    X = X.apply(pd.to_numeric, errors="coerce")
+
+    if X.isna().any().any():
+        bad_cols = X.columns[X.isna().any()].tolist()
+        raise ValueError("Có giá trị không hợp lệ ở các cột: " + ", ".join(bad_cols))
+
+    return X
+
+
+def get_threshold(model_name: str) -> float:
+    """Return model threshold with a safe fallback."""
+    value = thresholds.get(model_name, 0.5)
+    try:
+        return float(value)
+    except Exception:
+        return 0.5
+
+
+def score_models(df: pd.DataFrame) -> pd.DataFrame:
+    """Run all 3 models on a dataframe and return raw scores plus binary predictions."""
+    X = prepare_input_features(df)
+    X_scaled = scaler.transform(X)
+
+    # Logistic Regression: higher probability means higher fraud risk.
+    lr_score = lr_model.predict_proba(X_scaled)[:, 1]
+    lr_thr = get_threshold("Logistic Regression")
+    lr_pred = (lr_score >= lr_thr).astype(int)
+
+    # Isolation Forest: score_samples/decision_function usually gives lower values for anomalies,
+    # so we multiply by -1 to make higher score mean higher fraud/anomaly risk.
+    if_score = -iso_model.score_samples(X_scaled)
+    if_thr = get_threshold("Isolation Forest")
+    if_pred = (if_score >= if_thr).astype(int)
+
+    # Autoencoder: higher reconstruction error means higher anomaly risk.
+    ae_model.eval()
+    with torch.no_grad():
+        x_tensor = torch.tensor(X_scaled, dtype=torch.float32)
+        recon = ae_model(x_tensor).detach().cpu().numpy()
+    ae_score = np.mean((X_scaled - recon) ** 2, axis=1)
+    ae_thr = get_threshold("Autoencoder")
+    ae_pred = (ae_score >= ae_thr).astype(int)
+
+    return pd.DataFrame({
+        "LR_Score": lr_score,
+        "LR_Threshold": lr_thr,
+        "LR_Pred": lr_pred,
+        "IF_Score": if_score,
+        "IF_Threshold": if_thr,
+        "IF_Pred": if_pred,
+        "AE_Score": ae_score,
+        "AE_Threshold": ae_thr,
+        "AE_Pred": ae_pred,
+    })
+
+
+def score_one_row(input_df: pd.DataFrame) -> pd.DataFrame:
+    """Return long-form prediction table for the manual one-transaction tab."""
+    scores = score_models(input_df).iloc[0]
+
+    rows = [
+        {
+            "Model": "Logistic Regression",
+            "Score": float(scores["LR_Score"]),
+            "Threshold": float(scores["LR_Threshold"]),
+            "Prediction": "Fraud" if int(scores["LR_Pred"]) == 1 else "Normal",
+        },
+        {
+            "Model": "Isolation Forest",
+            "Score": float(scores["IF_Score"]),
+            "Threshold": float(scores["IF_Threshold"]),
+            "Prediction": "Fraud" if int(scores["IF_Pred"]) == 1 else "Normal",
+        },
+        {
+            "Model": "Autoencoder",
+            "Score": float(scores["AE_Score"]),
+            "Threshold": float(scores["AE_Threshold"]),
+            "Prediction": "Fraud" if int(scores["AE_Pred"]) == 1 else "Normal",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def run_batch(df: pd.DataFrame) -> pd.DataFrame:
+    """Run batch prediction for uploaded CSV and append outputs from all 3 models."""
+    scores = score_models(df)
+    pred_df = df.copy()
+
+    for col in scores.columns:
+        pred_df[col] = scores[col].values
+
+    pred_df["LR_Label"] = np.where(pred_df["LR_Pred"] == 1, "Fraud", "Normal")
+    pred_df["IF_Label"] = np.where(pred_df["IF_Pred"] == 1, "Fraud", "Normal")
+    pred_df["AE_Label"] = np.where(pred_df["AE_Pred"] == 1, "Fraud", "Normal")
+
+    # Convenience summary label based on the best model used in the report.
+    pred_df["Best_Model_Label"] = pred_df["LR_Label"]
+    pred_df["Best_Model_Score"] = pred_df["LR_Score"]
+
+    score_cols = ["LR_Score", "IF_Score", "AE_Score", "Best_Model_Score"]
+    for col in score_cols:
+        pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce").round(6)
+
+    return pred_df
+
+
 summary_df = summary_df.sort_values(["F1-score", "PR-AUC", "Recall"], ascending=False).reset_index(drop=True)
 best_model_row = summary_df.iloc[0]
 
