@@ -13,6 +13,7 @@ import torch.nn as nn
 BASE_DIR = Path(__file__).resolve().parent
 ARTIFACT_DIR = BASE_DIR / "artifacts"
 IMAGE_DIR = BASE_DIR / "images"
+SCORE_DISPLAY_DECIMALS = 10
 
 # UIT-inspired palette from UIT brand page snippet
 UIT_BLUE = "#2F6BFF"      # RGB(47,107,255)
@@ -412,8 +413,8 @@ def render_prediction_card(model_name: str, prediction: str, score: float, thres
             <div class='pred-title'>{model_name}</div>
             <div class='{badge_class}'>{prediction}</div>
             <div class='pred-metric'>Score</div>
-            <div class='pred-highlight'>{score:.6f}</div>
-            <div class='pred-metric' style='margin-top:0.55rem;'>Threshold: <b>{threshold:.6f}</b></div>
+            <div class='pred-highlight'>{score:.10f}</div>
+            <div class='pred-metric' style='margin-top:0.55rem;'>Threshold: <b>{threshold:.10f}</b></div>
             <div class='small-note' style='margin-top:0.55rem;'>{note}</div>
         </div>
         """,
@@ -537,9 +538,12 @@ def run_batch(df: pd.DataFrame) -> pd.DataFrame:
     pred_df["Best_Model_Label"] = pred_df["LR_Label"]
     pred_df["Best_Model_Score"] = pred_df["LR_Score"]
 
+    # Giữ nhiều chữ số thập phân để tránh trường hợp score/threshold gần nhau
+    # bị làm tròn thành cùng một giá trị khi demo hoặc xuất CSV.
     score_cols = ["LR_Score", "IF_Score", "AE_Score", "Best_Model_Score"]
-    for col in score_cols:
-        pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce").round(6)
+    threshold_cols = ["LR_Threshold", "IF_Threshold", "AE_Threshold"]
+    for col in score_cols + threshold_cols:
+        pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce").round(SCORE_DISPLAY_DECIMALS)
 
     return pred_df
 
@@ -699,7 +703,7 @@ with tab2:
             "Model": ["Isolation Forest", "Autoencoder", "Logistic Regression"],
             "Threshold": [thresholds["Isolation Forest"], thresholds["Autoencoder"], thresholds["Logistic Regression"]],
         })
-        threshold_df["Threshold"] = pd.to_numeric(threshold_df["Threshold"], errors="coerce").round(6)
+        threshold_df["Threshold"] = pd.to_numeric(threshold_df["Threshold"], errors="coerce").round(SCORE_DISPLAY_DECIMALS)
         st.dataframe(threshold_df, use_container_width=True, hide_index=True)
         st.markdown(
             """
@@ -762,7 +766,7 @@ with tab3:
 
         st.markdown("<div class='section-title'>Bảng chi tiết</div>", unsafe_allow_html=True)
         show_pred = result_df.copy()
-        show_pred[["Score", "Threshold"]] = show_pred[["Score", "Threshold"]].apply(pd.to_numeric, errors="coerce").round(6)
+        show_pred[["Score", "Threshold"]] = show_pred[["Score", "Threshold"]].apply(pd.to_numeric, errors="coerce").round(SCORE_DISPLAY_DECIMALS)
         st.dataframe(show_pred, use_container_width=True, hide_index=True)
 
 with tab4:
@@ -774,7 +778,14 @@ with tab4:
 
     uploaded = st.file_uploader("Chọn file CSV", type=["csv"])
     if uploaded is not None:
-        df = pd.read_csv(uploaded)
+        try:
+            df = pd.read_csv(uploaded)
+            # Xóa khoảng trắng thừa trong tên cột để tránh lỗi khi file được xuất từ Excel.
+            df.columns = df.columns.str.strip()
+        except Exception as e:
+            st.error(f"Không đọc được file CSV: {e}")
+            st.stop()
+
         st.markdown("<div class='section-title'>Xem trước dữ liệu</div>", unsafe_allow_html=True)
         st.dataframe(df.head(10), use_container_width=True)
 
@@ -782,8 +793,12 @@ with tab4:
         if missing:
             st.error("Thiếu các cột: " + ", ".join(missing))
         else:
-            pred_df = run_batch(df)
-            st.success("Đã chạy xong cho cả 3 mô hình.")
+            try:
+                pred_df = run_batch(df)
+                st.success("Đã chạy xong cho cả 3 mô hình.")
+            except Exception as e:
+                st.error(f"Lỗi khi chạy dự đoán: {e}")
+                st.stop()
 
             c1, c2, c3 = st.columns(3)
             c1.metric("Fraud theo LR", int(pred_df["LR_Pred"].sum()))
